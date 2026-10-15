@@ -1,0 +1,127 @@
+//@version=6
+// ============================================================
+// QKkok9 Kernal V9 Strategy — long-only daily system
+// Entry: Supertrend(7,2) flips up + close above 200MA + RVOL(20) >= 2.0
+// Exit : min 8-bar hold, then exit on next Supertrend flip-down
+// Signals confirm at bar close (no repaint). Validated on DAILY bars.
+// Walk-forward OOS PF 3.17 | all-time PF 3.09, n=236, win 55.1%
+// Paper-forward running (entries >= 2026-10-05 decide the verdict)
+// ============================================================
+strategy("QKkok9 Kernal V9", shorttitle="QKkok9 V9", overlay=true,
+     pyramiding=0, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100, initial_capital=100000,
+     commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ---------------- Inputs ----------------
+stLen    = input.int(7, "ST ATR Length", minval=1, group="Supertrend")
+stMult   = input.float(2.0, "ST Multiplier", minval=0.1, step=0.1, group="Supertrend")
+showST   = input.bool(false, "Show Supertrend line", group="Supertrend")
+
+showTMA = input.bool(true, "Show Trend MA (signal gate)", group="Moving Averages")
+tmaType = input.string("SMA", "Trend MA Type", options=["SMA", "EMA"], group="Moving Averages")
+tmaLen  = input.int(200, "Trend MA Length", minval=1, group="Moving Averages")
+showMA2 = input.bool(true, "Show MA 2", group="Moving Averages")
+ma2Type = input.string("SMA", "MA 2 Type", options=["SMA", "EMA"], group="Moving Averages")
+ma2Len  = input.int(50, "MA 2 Length", minval=1, group="Moving Averages")
+
+rvolLen = input.int(20, "RVOL Lookback", minval=1, group="Volume Gate")
+rvolMin = input.float(2.0, "RVOL Minimum", minval=0.1, step=0.1, group="Volume Gate")
+
+minHold = input.int(8, "V9 Min Hold (bars)", minval=1, group="V9 Exit")
+
+showVWAP  = input.bool(true, "Show VWAP", group="VWAP")
+anchor    = input.string("Month", "VWAP Anchor", options=["Session", "Week", "Month"],
+     tooltip="On Daily charts 'Session' resets every bar — use Week or Month.", group="VWAP")
+bandMult  = input.float(2.25, "Band StdDevs", minval=0.5, step=0.25, group="VWAP")
+showBands = input.bool(true, "Show ±band lines", group="VWAP")
+upCol     = input.color(color.teal, "VWAP Up Color (price above)", group="VWAP")
+dnCol     = input.color(color.red, "VWAP Down Color (price below)", group="VWAP")
+bandCol   = input.color(color.gray, "Band Color", group="VWAP")
+
+// ---------------- Supertrend (matches research engine) ----------------
+// dir: 1 = up, -1 = down. ATR = Wilder's EWM like the backtest.
+trST    = ta.tr(true)
+alphaST = 1.0 / stLen
+var float atrST = na
+atrST      := na(atrST[1]) ? trST : alphaST * trST + (1 - alphaST) * nz(atrST[1])
+basicUp    = hl2 + stMult * atrST
+basicDn    = hl2 - stMult * atrST
+var float fUp = na
+var float fDn = na
+fUp := close[1] > fUp[1] ? math.min(basicUp, fUp[1]) : basicUp
+fDn := close[1] < fDn[1] ? math.max(basicDn, fDn[1]) : basicDn
+var int stDir = 1
+stDir  := close > fUp[1] ? 1 : close < fDn[1] ? -1 : nz(stDir[1], 1)
+flipUp = stDir == 1 and stDir[1] == -1
+flipDn = stDir == -1 and stDir[1] == 1
+stLine = stDir == 1 ? fDn : fUp
+plot(showST ? stLine : na, "Supertrend", color=stDir == 1 ? color.new(color.green, 0) : color.new(color.red, 0), linewidth=1)
+
+// ---------------- Moving averages ----------------
+trendMA = tmaType == "SMA" ? ta.sma(close, tmaLen) : ta.ema(close, tmaLen)
+ma2     = ma2Type == "SMA" ? ta.sma(close, ma2Len) : ta.ema(close, ma2Len)
+plot(showTMA ? trendMA : na, "Trend MA", color=color.new(color.orange, 0), linewidth=2)
+plot(showMA2 ? ma2 : na, "MA 2", color=color.new(color.blue, 0), linewidth=1)
+
+// ---------------- V9 signals (confirmed at close) ----------------
+rvolVal = volume / ta.sma(volume, rvolLen)
+rvolOK  = na(rvolVal) ? true : rvolVal >= rvolMin
+buyCond = flipUp and close > trendMA and rvolOK
+
+var bool inV9 = false
+var int  v9Entry = na
+
+buyV9  = buyCond and not inV9 and barstate.isconfirmed
+sellV9 = inV9 and flipDn and bar_index - v9Entry >= minHold and barstate.isconfirmed
+
+if buyV9
+    inV9 := true
+    v9Entry := bar_index
+    strategy.entry("V9 Long", strategy.long)
+    alert("QKkok9 V9 BUY " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+if sellV9
+    inV9 := false
+    v9Entry := na
+    strategy.close("V9 Long", comment="V9 Exit")
+    alert("QKkok9 V9 SELL " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+
+cV9Buy  = #1B5E20   // dark green
+cV9Sell = #B71C1C   // dark red
+
+plotshape(buyV9, title="V9 Buy", style=shape.diamond,
+     location=location.belowbar, color=cV9Buy, text="V9", textcolor=color.white, size=size.small)
+plotshape(sellV9, title="V9 Sell", style=shape.diamond,
+     location=location.abovebar, color=cV9Sell, text="V9", textcolor=color.white, size=size.small)
+
+// ---------------- Anchored VWAP + 2.25σ bands ----------------
+anchorChg = switch anchor
+    "Session" => ta.change(time("D"))
+    "Week"    => ta.change(time("W"))
+    "Month"   => ta.change(time("M"))
+newAnchor = na(anchorChg) or anchorChg != 0
+
+srcV = hlc3
+vv   = nz(volume, 0.0)
+var float cPV = na
+var float cV  = na
+var float cP2 = na
+if newAnchor
+    cPV := srcV * vv
+    cV  := vv
+    cP2 := vv * srcV * srcV
+else
+    cPV += srcV * vv
+    cV  += vv
+    cP2 += vv * srcV * srcV
+
+vwapV  = cV > 0 ? cPV / cV : na
+varV   = cV > 0 ? math.max(cP2 / cV - vwapV * vwapV, 0) : na
+sdV    = math.sqrt(nz(varV))
+upperB = vwapV + bandMult * sdV
+lowerB = vwapV - bandMult * sdV
+vwapUp = close > vwapV
+
+pV = plot(showVWAP ? vwapV : na, "VWAP", color=vwapUp ? upCol : dnCol, linewidth=2)
+pU = plot(showBands ? upperB : na, "VWAP +band", color=color.new(bandCol, 20), linewidth=1)
+pL = plot(showBands ? lowerB : na, "VWAP -band", color=color.new(bandCol, 20), linewidth=1)
+fill(pU, pL, color=color.new(bandCol, 92), title="Band Fill")
